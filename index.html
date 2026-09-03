@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
@@ -2117,6 +2117,7 @@ function linhasNumerariosCartoesReceber(wb, arquivoOrigem) {
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
   const headerIdx = linhaCabecalhoRecebimentosNumerarios(raw, [
     { coluna: 2, nome: 'Empresa' },
+    { coluna: 5, nome: 'Adquirente' },
     { coluna: 14, nome: 'Valor Líquido' },
     { coluna: 19, nome: 'Conta' },
     { coluna: 20, nome: 'Dt. Liquidação' }
@@ -2124,6 +2125,7 @@ function linhasNumerariosCartoesReceber(wb, arquivoOrigem) {
   if (headerIdx === -1) return null;
   const linhas = raw.slice(headerIdx + 1).map((row, rowIdx) => {
     const valorLiquido = row[14];
+    const formaRecebimento = limparTextoECD(row[5] || 'Cartões');
     const tipoLancamento = limparTextoECD(row[24]);
     const historico = [row[5], row[6], row[7], row[8], tipoLancamento].filter(Boolean).join(' - ');
     return linhaRecebimentoRateioBase({
@@ -2132,7 +2134,7 @@ function linhasNumerariosCartoesReceber(wb, arquivoOrigem) {
       conta: row[19],
       empresaBanco: empresaRecebimentoNumerarios(row[19], row[2]),
       centroCusto: empresaRecebimentoNumerarios(row[2], row[2]),
-      tipo: valorNegativo(valorLiquido) ? 'Taxa/Ajuste de Cartões' : 'Recebimento de Cartões',
+      tipo: valorNegativo(valorLiquido) ? `${formaRecebimento} - Taxa/Ajuste` : formaRecebimento,
       historico,
       plano: 'Cartões recebidos',
       origem: 'Parcelas de Cartões a Receber',
@@ -2152,7 +2154,8 @@ function linhasNumerariosTitulosReceber(wb, arquivoOrigem) {
     { coluna: 3, nome: 'Empresa' },
     { coluna: 7, nome: 'Liquidação' },
     { coluna: 13, nome: 'Valor Líquido' },
-    { coluna: 14, nome: 'Conta' }
+    { coluna: 14, nome: 'Conta' },
+    { coluna: 15, nome: 'Meio de Pagamento' }
   ]);
   if (headerIdx === -1) return null;
   const linhas = raw.slice(headerIdx + 1).map((row, rowIdx) => {
@@ -2160,6 +2163,7 @@ function linhasNumerariosTitulosReceber(wb, arquivoOrigem) {
     if (status && !normalizarTexto(status).includes('liquidado')) return null;
     const plano = limparTextoECD(row[10] || 'Títulos recebidos');
     const tipoDoc = limparTextoECD(row[16] || 'Títulos recebidos');
+    const formaRecebimento = limparTextoECD(row[15] || 'Título recebido');
     const historico = [row[4], tipoDoc, row[1], plano, row[19]].filter(Boolean).join(' - ');
     return linhaRecebimentoRateioBase({
       data: row[7],
@@ -2167,7 +2171,7 @@ function linhasNumerariosTitulosReceber(wb, arquivoOrigem) {
       conta: row[14],
       empresaBanco: empresaRecebimentoNumerarios(row[14], row[3]),
       centroCusto: empresaRecebimentoNumerarios(row[3], row[3]),
-      tipo: 'Título recebido',
+      tipo: formaRecebimento,
       historico,
       plano,
       origem: 'Parcela de Título a Receber',
@@ -2910,18 +2914,31 @@ function pagamentoEhTarifaBancaria(pag) {
 
 function encontrarCombinacaoPorValor(candidatos, valorAlvo) {
   const alvo = Math.round(Math.abs(valorAlvo) * 100);
-  if (!alvo || candidatos.length < 2 || candidatos.length > 28) return null;
-  const dp = new Map([[0, []]]);
+  if (!alvo || candidatos.length < 2) return null;
+  const dp = new Map([[0, null]]);
+  const reconstruirIndices = somaFinal => {
+    const indices = [];
+    let soma = somaFinal;
+    while (soma > 0) {
+      const passo = dp.get(soma);
+      if (!passo) return [];
+      indices.push(passo.indice);
+      soma = passo.anterior;
+    }
+    return indices.reverse();
+  };
   for (let i = 0; i < candidatos.length; i++) {
     const centavos = Math.round(Math.abs(candidatos[i].mov.valor) * 100);
     if (!centavos || centavos > alvo) continue;
-    const entradas = Array.from(dp.entries());
-    for (const [soma, indices] of entradas) {
+    const somasExistentes = Array.from(dp.keys());
+    for (const soma of somasExistentes) {
       const novaSoma = soma + centavos;
       if (novaSoma > alvo || dp.has(novaSoma)) continue;
-      const novaLista = [...indices, i];
-      if (novaSoma === alvo && novaLista.length > 1) return novaLista.map(idx => candidatos[idx]);
-      dp.set(novaSoma, novaLista);
+      dp.set(novaSoma, { anterior: soma, indice: i });
+      if (novaSoma === alvo) {
+        const indices = reconstruirIndices(novaSoma);
+        if (indices.length > 1) return indices.map(idx => candidatos[idx]);
+      }
     }
   }
   return null;
@@ -3140,8 +3157,7 @@ function gerarSugestoesConciliacao(opcoes = {}) {
         && pag.dataKey === dataKey(mov.data)
         && fornecedorBatePagamentoMovimento(pag, movTexto)
         && Math.abs(mov.valor) <= pag.valor + 0.01)
-      .sort((a, b) => Math.abs(b.mov.valor) - Math.abs(a.mov.valor))
-      .slice(0, 28);
+      .sort((a, b) => Math.abs(b.mov.valor) - Math.abs(a.mov.valor));
     const combinacao = encontrarCombinacaoPorValor(candidatos, pag.valor);
     if (combinacao) {
       combinacao.forEach(c => usadosMov.add(c.idxMov));
@@ -3238,13 +3254,13 @@ function renderSugestoesConciliacao(sugestoes, qtdPagamentos, qtdMovimentos, ent
     : '';
   const linhasPagamentosPendentes = pendentesPagamento.map(renderLinhaPagamento).join('');
   const regrasRecebimentos = deparaRecebimentos[grupoAtivo] || {};
-  const itensRecebimentoExtrato = Array.from(entradasAgrupadas.values()).slice(0, 60).map((r, idx) => ({ ...r, id: `rec-${idx}`, movimento: 'recebimento', escopoRegra: '' }));
+  const itensRecebimentoExtrato = Array.from(entradasAgrupadas.values()).map((r, idx) => ({ ...r, id: `rec-${idx}`, movimento: 'recebimento', escopoRegra: '' }));
   const itensRecebimentoRateio = conciliacaoUsaRecebimentosDoExtrato()
     ? criarItensRecebimentosRateioAgrupados()
     : [];
   const itensRecebimento = [...itensRecebimentoExtrato, ...itensRecebimentoRateio];
   const itensNumerarioRateio = itensNumerarioRecebimentosRateio(itensRecebimentoRateio);
-  const itensSaidaExtra = saidasExtras.slice(0, 80).map(({ mov, idxMov }) => ({
+  const itensSaidaExtra = saidasExtras.map(({ mov, idxMov }) => ({
     id: `saida-${idxMov}`,
     movimento: 'saida-pendente',
     tipo: mov.tipoConciliacao || 'Saída não conciliada',
