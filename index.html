@@ -1922,13 +1922,13 @@ function conciliacaoUsaRecebimentosDoExtrato() {
   return !grupoUsaNumerariosParcelas();
 }
 
-function normalizarCabecalhoRecebimentos(valor) {
+function normalizarCabecalhoRecebimentosNumerarios(valor) {
   return normalizarTexto(valor)
     .replace(/\uFFFD/g, '')
     .replace(/[^a-z0-9]/g, '');
 }
 
-function distanciaEdicaoCabecalho(a, b) {
+function distanciaEdicaoCabecalhoRecebimentosNumerarios(a, b) {
   if (a === b) return 0;
   if (!a.length) return b.length;
   if (!b.length) return a.length;
@@ -1947,23 +1947,23 @@ function distanciaEdicaoCabecalho(a, b) {
   return anterior[b.length];
 }
 
-function cabecalhoRecebimentosEquivale(valor, esperado) {
-  const atual = normalizarCabecalhoRecebimentos(valor);
-  const alvo = normalizarCabecalhoRecebimentos(esperado);
+function cabecalhoRecebimentosNumerariosEquivale(valor, esperado) {
+  const atual = normalizarCabecalhoRecebimentosNumerarios(valor);
+  const alvo = normalizarCabecalhoRecebimentosNumerarios(esperado);
   if (!atual || !alvo) return false;
   if (atual === alvo) return true;
   const limite = Math.min(atual.length, alvo.length) >= 8 ? 2 : 1;
-  return distanciaEdicaoCabecalho(atual, alvo) <= limite;
+  return distanciaEdicaoCabecalhoRecebimentosNumerarios(atual, alvo) <= limite;
 }
 
 function headerInfoRecebimentos(raw, obrigatorias) {
   const headerIdx = raw.findIndex(row => {
-    const cols = row || [];
-    return obrigatorias.every(nome => cols.some(c => cabecalhoRecebimentosEquivale(c, nome)));
+    const cols = (row || []).map(c => normalizarTexto(c));
+    return obrigatorias.every(nome => cols.includes(normalizarTexto(nome)));
   });
   if (headerIdx === -1) return null;
-  const headers = raw[headerIdx] || [];
-  const idx = nome => headers.findIndex(c => cabecalhoRecebimentosEquivale(c, nome));
+  const headers = raw[headerIdx].map(c => normalizarTexto(c));
+  const idx = nome => headers.indexOf(normalizarTexto(nome));
   return { headerIdx, idx };
 }
 
@@ -1999,7 +1999,7 @@ function linhasRateioCartoesReceber(wb, arquivoOrigem) {
   const nomePlanilha = wb.SheetNames.find(n => /cart/i.test(n)) || wb.SheetNames[0];
   const ws = wb.Sheets[nomePlanilha];
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const info = headerInfoRecebimentos(raw, ['Empresa', 'Adquirente', 'Produto', 'Dt. Liquidação', 'Valor Bruto', 'Conta', 'Centro de Custo']);
+  const info = headerInfoRecebimentos(raw, ['Empresa', 'Adquirente', 'Produto', 'Dt. Liquidação', 'Valor Bruto', 'Conta', 'Centro de Custo', 'Plano de Conta']);
   if (!info) return null;
   const { headerIdx, idx } = info;
   const col = {
@@ -2017,7 +2017,7 @@ function linhasRateioCartoesReceber(wb, arquivoOrigem) {
   };
   const linhas = raw.slice(headerIdx + 1).map((row, rowIdx) => {
     const tipoLancamento = limparTextoECD(col.tipoLancamento >= 0 ? row[col.tipoLancamento] : '');
-    const plano = limparTextoECD(col.plano >= 0 ? row[col.plano] : 'Cartões recebidos');
+    const plano = limparTextoECD(row[col.plano]);
     const partesHistorico = [
       col.adquirente >= 0 ? row[col.adquirente] : '',
       col.bandeira >= 0 ? row[col.bandeira] : '',
@@ -2098,6 +2098,109 @@ function linhasRateioTitulosReceber(wb, arquivoOrigem) {
     });
   }).filter(Boolean);
   return { tipo: 'titulos', nomePlanilha, linhas };
+}
+
+function linhaCabecalhoRecebimentosNumerarios(raw, validacoes) {
+  return raw.findIndex(row => validacoes.every(({ coluna, nome }) =>
+    cabecalhoRecebimentosNumerariosEquivale((row || [])[coluna], nome)
+  ));
+}
+
+function empresaRecebimentoNumerarios(valor, fallback = '') {
+  const codigo = extrairPrimeiroCodigoEmpresa(valor);
+  return nomeEmpresaImportadaPorCodigo(codigo || valor, codigo || fallback || valor);
+}
+
+function linhasNumerariosCartoesReceber(wb, arquivoOrigem) {
+  const nomePlanilha = wb.SheetNames.find(n => /cart/i.test(n)) || wb.SheetNames[0];
+  const ws = wb.Sheets[nomePlanilha];
+  const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const headerIdx = linhaCabecalhoRecebimentosNumerarios(raw, [
+    { coluna: 2, nome: 'Empresa' },
+    { coluna: 14, nome: 'Valor Líquido' },
+    { coluna: 19, nome: 'Conta' },
+    { coluna: 20, nome: 'Dt. Liquidação' }
+  ]);
+  if (headerIdx === -1) return null;
+  const linhas = raw.slice(headerIdx + 1).map((row, rowIdx) => {
+    const valorLiquido = row[14];
+    const tipoLancamento = limparTextoECD(row[24]);
+    const historico = [row[5], row[6], row[7], row[8], tipoLancamento].filter(Boolean).join(' - ');
+    return linhaRecebimentoRateioBase({
+      data: row[20],
+      valor: valorLiquido,
+      conta: row[19],
+      empresaBanco: empresaRecebimentoNumerarios(row[19], row[2]),
+      centroCusto: empresaRecebimentoNumerarios(row[2], row[2]),
+      tipo: valorNegativo(valorLiquido) ? 'Taxa/Ajuste de Cartões' : 'Recebimento de Cartões',
+      historico,
+      plano: 'Cartões recebidos',
+      origem: 'Parcelas de Cartões a Receber',
+      arquivoOrigem,
+      linhaOrigem: headerIdx + rowIdx + 2,
+      tipoLancamento
+    });
+  }).filter(Boolean);
+  return { tipo: 'cartoes', nomePlanilha, linhas };
+}
+
+function linhasNumerariosTitulosReceber(wb, arquivoOrigem) {
+  const nomePlanilha = wb.SheetNames.find(n => /receber|parcela|t[íi]tulo/i.test(n)) || wb.SheetNames[0];
+  const ws = wb.Sheets[nomePlanilha];
+  const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const headerIdx = linhaCabecalhoRecebimentosNumerarios(raw, [
+    { coluna: 3, nome: 'Empresa' },
+    { coluna: 7, nome: 'Liquidação' },
+    { coluna: 13, nome: 'Valor Líquido' },
+    { coluna: 14, nome: 'Conta' }
+  ]);
+  if (headerIdx === -1) return null;
+  const linhas = raw.slice(headerIdx + 1).map((row, rowIdx) => {
+    const status = limparTextoECD(row[18] || 'Liquidado');
+    if (status && !normalizarTexto(status).includes('liquidado')) return null;
+    const plano = limparTextoECD(row[10] || 'Títulos recebidos');
+    const tipoDoc = limparTextoECD(row[16] || 'Títulos recebidos');
+    const historico = [row[4], tipoDoc, row[1], plano, row[19]].filter(Boolean).join(' - ');
+    return linhaRecebimentoRateioBase({
+      data: row[7],
+      valor: row[13],
+      conta: row[14],
+      empresaBanco: empresaRecebimentoNumerarios(row[14], row[3]),
+      centroCusto: empresaRecebimentoNumerarios(row[3], row[3]),
+      tipo: 'Título recebido',
+      historico,
+      plano,
+      origem: 'Parcela de Título a Receber',
+      arquivoOrigem,
+      linhaOrigem: headerIdx + rowIdx + 2,
+      tipoLancamento: status
+    });
+  }).filter(Boolean);
+  return { tipo: 'titulos', nomePlanilha, linhas };
+}
+
+function lerRecebimentosNumerariosArquivo(file, onProgress = null) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = function(e) {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 85), file);
+    };
+    reader.onload = function(e) {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, { type: 'array', cellDates: true });
+        const cartoes = linhasNumerariosCartoesReceber(wb, file.name);
+        const titulos = cartoes ? null : linhasNumerariosTitulosReceber(wb, file.name);
+        const resultado = cartoes || titulos;
+        if (!resultado || resultado.linhas.length === 0) throw new Error('Nenhum recebimento liquidado foi encontrado nas colunas esperadas para Numerários.');
+        resolve({ arquivo: file.name, ...resultado });
+      } catch (err) {
+        reject(new Error(`${file.name}: ${err.message}`));
+      }
+    };
+    reader.onerror = () => reject(new Error(`${file.name}: erro ao ler o arquivo.`));
+    reader.readAsArrayBuffer(file);
+  });
 }
 
 function lerRecebimentosRateioArquivo(file, onProgress = null) {
@@ -2299,7 +2402,7 @@ async function processarRecebimentosSeparados(files) {
   }
   iniciarProgressoImportacao('Lendo recebimentos...');
   try {
-    const resultados = await Promise.all(files.map(file => lerRecebimentosRateioArquivo(file, p => atualizarProgressoImportacao(p, 'Lendo recebimentos...', file.name))));
+    const resultados = await Promise.all(files.map(file => lerRecebimentosNumerariosArquivo(file, p => atualizarProgressoImportacao(p, 'Lendo recebimentos...', file.name))));
     const qtd = adicionarRecebimentosRateio(resultados.map(r => ({ ...r, tipo: 'recebimento' })));
     mostrarMsgRecebimentos(`${qtd} recebimento${qtd !== 1 ? 's' : ''} importado${qtd !== 1 ? 's' : ''}.`, 'ok');
     renderRecebimentosSeparados();
@@ -2311,7 +2414,7 @@ async function processarRecebimentosSeparados(files) {
 }
 
 function onFileChangeRecebimentosSeparados(e) {
-  const files = Array.from(e.target.files || []);
+  const files = Array.from(e.target.files || []).filter(file => !file.name.startsWith('~$'));
   if (files.length > 0) processarRecebimentosSeparados(files);
   e.target.value = '';
 }
